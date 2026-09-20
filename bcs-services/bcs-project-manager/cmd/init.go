@@ -81,6 +81,7 @@ type ProjectService struct {
 	discovery        *discovery.ModuleDiscovery
 	clusterDiscovery *discovery.ModuleDiscovery
 	namespaceManager *manager.NamespaceManager
+	businessManager  *manager.BusinessManager
 
 	// http service
 	httpServer *ipv6server.IPv6Server
@@ -124,6 +125,7 @@ func (p *ProjectService) Init() error {
 		p.initMicro,
 		p.initHttpService,
 		p.initNamespaceManager,
+		p.initBusinessManager,
 		p.initMetric,
 		p.initI18n,
 	} {
@@ -139,6 +141,9 @@ func (p *ProjectService) Run() error {
 	// manage namespace scheduled task
 	if p.opt.ITSM.Enable {
 		go p.namespaceManager.Run()
+	}
+	if p.opt.BusinessSync.Enable && p.businessManager != nil {
+		go p.businessManager.Run()
 	}
 	// run the service
 	if err := p.microSvc.Run(); err != nil {
@@ -571,6 +576,12 @@ func (p *ProjectService) initHttpService() error {
 func (p *ProjectService) initNamespaceManager() error {
 	logging.Info("init namespace manager")
 	p.namespaceManager = manager.NewNamespaceManager(p.ctx, p.model)
+	return nil
+}
+
+func (p *ProjectService) initBusinessManager() error {
+	logging.Info("init business manager")
+	p.businessManager = manager.NewBusinessManager(p.ctx, p.model)
 	return nil
 }
 

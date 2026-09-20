@@ -217,6 +217,14 @@ type ProjectConfig struct {
 	TaskConfig                 TaskConfig                   `yaml:"taskConfig"`
 	SharedClusterConfig        SharedClusterConfig          `yaml:"sharedClusterConfig"`
 	SystemConfig               SystemCommonConfig           `yaml:"systemConfig"`
+	BusinessSync               BusinessSyncConfig           `yaml:"businessSync"`
+}
+
+// BusinessSyncConfig CMDB 业务全量同步配置
+type BusinessSyncConfig struct {
+	Enable bool `yaml:"enable" usage:"enable business sync from cmdb"`
+	// Interval 同步间隔，单位秒，默认 600
+	Interval int `yaml:"interval" usage:"business sync interval in seconds, default 600"`
 }
 
 func (conf *ProjectConfig) initServerAddress() {
