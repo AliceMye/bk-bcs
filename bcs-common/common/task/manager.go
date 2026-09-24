@@ -351,6 +351,12 @@ func (m *TaskManager) doWork(taskID string, stepName string) error { // nolint
 	if err != nil {
 		log.ERROR.Printf("task[%s] stepName[%s] getTaskState failed: %v",
 			taskID, stepName, err)
+		// 读不到任务数据时任务状态一个字段都没改过, 直接返回错误会让消息被 ack 掉:
+		// 任务永远停在下发态, 所属任务组的阶段计数也再凑不满, 后续阶段不会下发。
+		// 除非任务确实不存在, 否则一律延迟重投, 等存储恢复后接着跑。
+		if errors.Is(err, ErrLoadTask) && !errors.Is(err, istore.ErrTaskNotFound) {
+			return tasks.NewErrRetryTaskLater(err.Error(), DefaultMaxRetryDuration)
+		}
 		return err
 	}
 

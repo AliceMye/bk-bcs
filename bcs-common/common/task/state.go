@@ -28,6 +28,12 @@ import (
 // defaultIgnoredTaskMessage 被忽略的步骤兜底描述
 const defaultIgnoredTaskMessage = "task finished with ignored steps"
 
+// ErrLoadTask 从存储读取任务数据失败, 与任务自身状态无关。
+//
+// 这一步失败时任务的状态、步骤、任务组计数都还没有发生任何变更, 调用方需要据此区分
+// 「任务还没开始跑」与「任务跑到一半失败」, 前者只能靠重投消息恢复。
+var ErrLoadTask = errors.New("load task failed")
+
 // taskEndStatus task结束状态,处理超时和revoke
 type taskEndStatus struct {
 	status   string
@@ -38,7 +44,7 @@ type taskEndStatus struct {
 func (m *TaskManager) getTaskState(taskId, stepName string) (*State, error) {
 	task, err := GetGlobalStorage().GetTask(context.Background(), taskId)
 	if err != nil {
-		return nil, fmt.Errorf("get task %s information failed, %s", taskId, err.Error())
+		return nil, fmt.Errorf("%w: get task %s information failed, %w", ErrLoadTask, taskId, err)
 	}
 
 	if task.CommonParams == nil {

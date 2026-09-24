@@ -15,6 +15,7 @@ package mysql
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -30,6 +31,14 @@ import (
 // batchSize 批量写入与 IN 条件的分片大小
 const batchSize = 500
 
+// defaultConnMaxLifetime 连接默认最大存活时间。
+//
+// database/sql 默认不限制连接存活时间, 空闲连接会被 MySQL wait_timeout 或链路上的
+// 负载均衡单方面关闭, 复用这类连接时 go-sql-driver 返回 invalid connection, 且该错误
+// 不是 driver.ErrBadConn, database/sql 不会自动换连接重试, 会直接冒到调用方。
+// 任务执行是低频突发流量, 连接在两批任务之间长时间闲置, 命中概率很高, 因此默认主动回收。
+const defaultConnMaxLifetime = 3 * time.Minute
+
 // chunkSlice 把切片按 size 分片
 func chunkSlice[T any](items []T, size int) [][]T {
 	if size <= 0 || len(items) <= size {
@@ -44,9 +53,12 @@ func chunkSlice[T any](items []T, size int) [][]T {
 }
 
 type mysqlStore struct {
-	dsn   string
-	debug bool
-	db    *gorm.DB
+	dsn             string
+	debug           bool
+	maxOpenConns    int
+	maxIdleConns    int
+	connMaxLifetime time.Duration
+	db              *gorm.DB
 }
 
 type option func(*mysqlStore)
@@ -58,9 +70,32 @@ func WithDebug(debug bool) option {
 	}
 }
 
+// WithMaxOpenConns 设置连接池最大连接数, 不设置或非正数时沿用 database/sql 的不限制
+func WithMaxOpenConns(n int) option {
+	return func(s *mysqlStore) {
+		s.maxOpenConns = n
+	}
+}
+
+// WithMaxIdleConns 设置连接池最大空闲连接数, 不设置或非正数时沿用 database/sql 的默认值
+func WithMaxIdleConns(n int) option {
+	return func(s *mysqlStore) {
+		s.maxIdleConns = n
+	}
+}
+
+// WithConnMaxLifetime 设置连接最大存活时间, 取值必须小于 MySQL wait_timeout 以及链路上
+// 各级代理的空闲超时, 否则连接会被服务端先行关闭, 复用时报 invalid connection。
+// 不设置时取 defaultConnMaxLifetime, 传入非正数表示不限制。
+func WithConnMaxLifetime(d time.Duration) option {
+	return func(s *mysqlStore) {
+		s.connMaxLifetime = d
+	}
+}
+
 // New init mysql iface.Store
 func New(dsn string, opts ...option) (iface.Store, error) {
-	store := &mysqlStore{dsn: dsn, debug: false}
+	store := &mysqlStore{dsn: dsn, debug: false, connMaxLifetime: defaultConnMaxLifetime}
 	for _, opt := range opts {
 		opt(store)
 	}
@@ -77,6 +112,19 @@ func New(dsn string, opts ...option) (iface.Store, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	if store.maxOpenConns > 0 {
+		sqlDB.SetMaxOpenConns(store.maxOpenConns)
+	}
+	if store.maxIdleConns > 0 {
+		sqlDB.SetMaxIdleConns(store.maxIdleConns)
+	}
+	sqlDB.SetConnMaxLifetime(store.connMaxLifetime)
+
 	store.db = db
 
 	return store, nil
@@ -304,6 +352,9 @@ func (s *mysqlStore) GetTask(ctx context.Context, taskID string) (*types.Task, e
 	tx := s.db.WithContext(ctx)
 	taskRecord := TaskRecord{}
 	if err := tx.Where("task_id = ?", taskID).First(&taskRecord).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: %s, %w", iface.ErrTaskNotFound, taskID, err)
+		}
 		return nil, err
 	}
 

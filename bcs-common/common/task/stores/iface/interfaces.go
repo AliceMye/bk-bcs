@@ -15,10 +15,17 @@ package iface
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Tencent/bk-bcs/bcs-common/common/task/types"
 )
+
+// ErrTaskNotFound 任务在存储中不存在。
+//
+// 与「存储访问失败」区分开: 后者多为连接被服务端回收、网络抖动等瞬时故障, 重试即可恢复;
+// 而任务不存在是终态, 调用方据此决定是重投消息还是直接终结。
+var ErrTaskNotFound = errors.New("task not found")
 
 // ListOption ...
 type ListOption struct {
