@@ -19,7 +19,6 @@ import (
 
 	"github.com/Tencent/bk-bcs/bcs-common/common/blog"
 	goyaml "github.com/goccy/go-yaml"
-	"github.com/goccy/go-yaml/ast"
 	"github.com/goccy/go-yaml/parser"
 	cmdtpl "github.com/vmware-tanzu/carvel-ytt/pkg/cmd/template"
 	"github.com/vmware-tanzu/carvel-ytt/pkg/cmd/ui"
@@ -209,96 +208,118 @@ func inject4MetadataLabels(manifest string) (string, error) {
 	return manifest, nil
 }
 
-// paasMetaPaths 需要清理 paas 元数据的位置。
-/*
-需要要同时处理 annotations 和 labels：实测 Deployment 的 metadata.annotations 与
-metadata.labels 两处都有 io.tencent.paas.creator / updator，只清 annotations 会漏，
-用户 kubectl get -o yaml 仍看得到人名。
-spec.template 下的两份是防御性覆盖：实测当前模板未把这三个 key 注入到 pod template 层，
-路径不存在或无命中时 removePaasMetadataByPath 自动跳过，无副作用，也不会触发 Pod 滚动。
-*/
-var paasMetaPaths = []string{
-	"$.metadata.annotations",
-	"$.metadata.labels",
-	"$.spec.template.metadata.annotations",
-	"$.spec.template.metadata.labels",
+// paasMetaPaths 需要清理 paas 元数据的位置，元素为逐级的 key 路径。
+// annotations 与 labels 都要处理：creator / updator 两处都存在，只清 annotations 会漏。
+// spec.template 下的两份是防御性覆盖，路径不存在时自动跳过，也不会触发 Pod 滚动。
+var paasMetaPaths = [][]string{
+	{"metadata", "annotations"},
+	{"metadata", "labels"},
+	{"spec", "template", "metadata", "annotations"},
+	{"spec", "template", "metadata", "labels"},
 }
 
-/*
 // removePaasMetadata 删除 BCS 注入的 io.tencent.paas 系列元数据（annotations 与 labels）。
-// 必须与"不放占位符"配合使用：仅不放占位符会让值变成空串而不是消失，
-// 且会把 creator 原有值覆盖为空，造成不可逆的数据丢失。
-//
+// 必须与"不放占位符"配合使用：仅不放占位符会让值变成空串而非消失，并覆盖 creator 原有值。
 // 未删到任何内容时原样返回 manifest，避免对无关资源（CRD / Secret 等）做无谓的重新格式化。
-*/
 func removePaasMetadata(manifest string) (string, error) {
-	// 转换为常用格式, goyaml 库不能识别 |2- 之类的描述符
 	var n yaml.MapSlice
 	if err := yaml.Unmarshal([]byte(manifest), &n); err != nil {
 		return manifest, err
 	}
-	out, err := yaml.Marshal(&n)
-	if err != nil {
-		return manifest, err
-	}
-	s := string(out)
 
-	f, err := parser.ParseBytes([]byte(s), 0)
-	if err != nil {
-		return manifest, err
-	}
-
+	root := interface{}(n)
 	removed := false
 	for _, path := range paasMetaPaths {
-		ok, err := removePaasMetadataByPath(f, s, path)
-		if err != nil {
-			return manifest, err
-		}
+		v, ok := removePaasMetadataInPath(root, path)
 		if ok {
 			removed = true
+			root = v
 		}
 	}
 
-	// 与 inject4MetadataLabels 保持一致的收尾原则：
-	// 没有命中就返回原始 manifest，不对无关资源做无谓的重新格式化
 	if !removed {
 		return manifest, nil
 	}
-	return f.String(), nil
+
+	out, err := yaml.Marshal(root)
+	if err != nil {
+		return manifest, err
+	}
+	return string(out), nil
 }
 
-// removePaasMetadataByPath 删除指定路径下属于 paas 系列的 key，返回是否真的删到了
-func removePaasMetadataByPath(f *ast.File, s, path string) (bool, error) {
-	p, err := goyaml.PathString(path)
-	if err != nil {
-		return false, err
-	}
-
-	items := make(map[string]string)
-	// 路径不存在时直接跳过（如 ConfigMap 没有 spec.template）
-	if err := p.Read(strings.NewReader(s), &items); err != nil {
-		return false, nil
+// removePaasMetadataInPath 沿路径下钻，删除末端 map 中属于 paas 系列的 key，返回是否真的删到了。
+// 只做结构化读写，不触碰 goccy/go-yaml 的 AST：ReplaceWithReader 之后 AST 的缩进信息会失真，
+// String() 内部 strings.Repeat 拿到负数会 panic（v1.9.6 已确认），进而让进程崩溃。
+func removePaasMetadataInPath(node interface{}, keys []string) (interface{}, bool) {
+	if len(keys) == 0 {
+		return removePaasMetadataInMap(node)
 	}
 
 	removed := false
-	for k := range items {
-		if stringx.StringInSlice(k, common.PaasMetadataKeys) {
-			delete(items, k)
-			removed = true
+	switch v := node.(type) {
+	case yaml.MapSlice:
+		for i := range v {
+			k, ok := v[i].Key.(string)
+			if !ok || k != keys[0] {
+				continue
+			}
+			nv, r := removePaasMetadataInPath(v[i].Value, keys[1:])
+			if r {
+				v[i].Value = nv
+				removed = true
+			}
 		}
+		return v, removed
+	case map[interface{}]interface{}:
+		for k, val := range v {
+			ks, ok := k.(string)
+			if !ok || ks != keys[0] {
+				continue
+			}
+			nv, r := removePaasMetadataInPath(val, keys[1:])
+			if r {
+				v[k] = nv
+				removed = true
+			}
+		}
+		return v, removed
 	}
-	if !removed {
-		return false, nil
-	}
+	return node, false
+}
 
-	// 全部删空时写入空 map，避免出现 `annotations: []` 导致 K8s 校验失败。
-	// yaml.Marshal 一个空 map 会输出 `{}`，正好是期望的形态。
-	b, err := yaml.Marshal(items)
-	if err != nil {
-		return false, err
+// removePaasMetadataInMap 删除同一层级 map 中属于 paas 系列的 key，返回是否真的删到了
+func removePaasMetadataInMap(node interface{}) (interface{}, bool) {
+	switch v := node.(type) {
+	case yaml.MapSlice:
+		out := make(yaml.MapSlice, 0, len(v))
+		removed := false
+		for _, item := range v {
+			k, ok := item.Key.(string)
+			if ok && stringx.StringInSlice(k, common.PaasMetadataKeys) {
+				removed = true
+				continue
+			}
+			out = append(out, item)
+		}
+		// 删空后改用普通 map：空 MapSlice 会被 marshal 成 `annotations: []`，K8s 会拒绝
+		if removed && len(out) == 0 {
+			return map[string]interface{}{}, true
+		}
+		return out, removed
+	case map[interface{}]interface{}:
+		removed := false
+		for k := range v {
+			ks, ok := k.(string)
+			if ok && stringx.StringInSlice(ks, common.PaasMetadataKeys) {
+				delete(v, k)
+				removed = true
+			}
+		}
+		if removed && len(v) == 0 {
+			return map[string]interface{}{}, true
+		}
+		return v, removed
 	}
-	if err := p.ReplaceWithReader(f, bytes.NewReader(b)); err != nil {
-		return false, err
-	}
-	return true, nil
+	return node, false
 }

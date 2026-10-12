@@ -2315,6 +2315,10 @@ message ReleasePreviewReq {
         title: "revision",
         description: "release revision 版本, 如果revision为0, 则对比当前渲染结果和已部署的最新版本, 如果不为0, 则对比最新版本和指定版本"
     }];
+    optional bool skipPaasAnnotations = 11[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+        title: "skipPaasAnnotations",
+        description: "是否不注入 BCS 的 io.tencent.paas 系列注解"
+    }];
 }
 
 message ReleasePreviewResp {
