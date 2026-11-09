@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/Tencent/bk-bcs/bcs-services/pkg/bcs-auth/middleware"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +27,7 @@ import (
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/actions/namespace/independent"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/common/envs"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/clientset"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/clustermanager"
 	v2 "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/itsm/v2"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/config"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/logging"
@@ -69,6 +71,7 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 			MemoryRequests: req.GetQuota().GetMemoryRequests(),
 			MemoryLimits:   req.GetQuota().GetMemoryLimits(),
 		},
+		UpdateTime: time.Now().UTC().Format(time.RFC3339),
 	}
 	variables := []*nsm.Variable{}
 	for _, variable := range req.GetVariables() {
@@ -111,10 +114,37 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 }
 
 func (a *SharedNamespaceAction) validateCreate(ctx context.Context, req *proto.CreateNamespaceRequest) error {
+	// 归属项目必须在集群可见范围内（集群所属项目自身可直接创建）
+	cluster, err := clustermanager.GetCluster(ctx, req.ClusterID, true)
+	if err != nil {
+		logging.Error("get cluster %s failed, err: %s", req.ClusterID, err.Error())
+		return errorx.NewClusterErr(err.Error())
+	}
+	ownerProject, err := a.model.GetProject(ctx, cluster.GetProjectID())
+	if err != nil {
+		logging.Error("get cluster owner project %s failed, err: %s", cluster.GetProjectID(), err.Error())
+		return errorx.NewDBErr(err.Error())
+	}
+	if req.ProjectCode != ownerProject.ProjectCode {
+		targetProject, tErr := a.model.GetProject(ctx, req.ProjectCode)
+		if tErr != nil {
+			return errorx.NewReadableErr(errorx.ProjectNotExistsErr, "归属项目不存在")
+		}
+		if err := a.checkProjectInSharedRanges(cluster, targetProject); err != nil {
+			return err
+		}
+	}
 	// check is namespace name valid
-	if !strings.HasPrefix(req.Name, fmt.Sprintf(NamespacePrefix, req.ProjectCode)) {
-		return errorx.NewReadableErr(errorx.ParamErr, fmt.Sprintf("共享集群命名空间必须以 %s-[projectCode]- 开头",
-			envs.BCSNamespacePrefix))
+	// 长名回退：bcs-{projectCode}- 前缀 + 自定义部分超 63 字符时，允许使用平台前缀 bcs-
+	fullPrefix := fmt.Sprintf(NamespacePrefix, req.ProjectCode)
+	platformPrefix := envs.BCSNamespacePrefix + "-"
+	if !strings.HasPrefix(req.Name, fullPrefix) {
+		customPart := strings.TrimPrefix(req.Name, platformPrefix)
+		wouldExceed := len(fullPrefix)+len(customPart) > 63
+		if !(strings.HasPrefix(req.Name, platformPrefix) && wouldExceed) {
+			return errorx.NewReadableErr(errorx.ParamErr, fmt.Sprintf("共享集群命名空间必须以 %s-[projectCode]- 开头",
+				envs.BCSNamespacePrefix))
+		}
 	}
 	// check is namespace name exists
 	stagings, _ := a.model.ListNamespacesByItsmTicketType(ctx,

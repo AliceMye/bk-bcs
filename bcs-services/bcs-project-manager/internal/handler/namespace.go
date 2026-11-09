@@ -82,6 +82,22 @@ func (p *NamespaceHandler) CreateNamespace(ctx context.Context,
 	return action.CreateNamespace(ctx, req, resp)
 }
 
+// AllocateNamespace implement for AllocateNamespace interface
+func (p *NamespaceHandler) AllocateNamespace(ctx context.Context,
+	req *proto.AllocateNamespaceRequest, resp *proto.AllocateNamespaceResponse) error {
+
+	authUser := tenant.GetAuthAndTenantInfoFromCtx(ctx)
+	ctx = tenant.WithTenantIdFromContext(ctx, authUser.ResourceTenantId)
+
+	action, err := na.NewNamespaceFactory(p.model).Action(ctx, req.GetClusterID(), req.GetProjectCode())
+	if err != nil {
+		logging.Error("get namespace client for cluster %s from client factory failed, err: %s",
+			req.GetClusterID(), err.Error())
+		return err
+	}
+	return action.AllocateNamespace(ctx, req, resp)
+}
+
 // CreateNamespaceCallback implement for CreateNamespaceCallback interface
 func (p *NamespaceHandler) CreateNamespaceCallback(ctx context.Context,
 	req *proto.NamespaceCallbackRequest, resp *proto.NamespaceCallbackResponse) error {
