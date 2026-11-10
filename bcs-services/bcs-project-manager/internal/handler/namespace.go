@@ -89,7 +89,7 @@ func (p *NamespaceHandler) AllocateNamespace(ctx context.Context,
 	authUser := tenant.GetAuthAndTenantInfoFromCtx(ctx)
 	ctx = tenant.WithTenantIdFromContext(ctx, authUser.ResourceTenantId)
 
-	action, err := na.NewNamespaceFactory(p.model).Action(ctx, req.GetClusterID(), req.GetProjectCode())
+	action, err := na.NewNamespaceFactory(p.model).ActionForAllocate(ctx, req.GetClusterID())
 	if err != nil {
 		logging.Error("get namespace client for cluster %s from client factory failed, err: %s",
 			req.GetClusterID(), err.Error())
