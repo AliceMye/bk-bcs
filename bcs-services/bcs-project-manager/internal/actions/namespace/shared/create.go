@@ -167,6 +167,10 @@ func (a *SharedNamespaceAction) validateCreate(ctx context.Context, req *proto.C
 		logging.Error("get namespace in cluster %s failed, err: %s", req.ClusterID, err.Error())
 		return errorx.NewClusterErr(err.Error())
 	}
+	// 创建/分配时强制设置 CPU/内存配额，共享集群创建不允许缺省配额
+	if req.GetQuota() == nil {
+		return errorx.NewReadableErr(errorx.ParamErr, "命名空间配额不能为空")
+	}
 	// check resourceQuota validate
 	if err := quotautils.ValidateResourceQuota(req.Quota); err != nil {
 		return err
