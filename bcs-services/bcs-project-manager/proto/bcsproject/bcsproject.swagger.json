@@ -1697,6 +1697,61 @@
         ]
       }
     },
+    "/bcsproject/v1/projects/{projectCode}/clusters/{clusterID}/namespaces/{namespace}/recycle": {
+      "post": {
+        "summary": "回收命名空间",
+        "description": "回收已分配的命名空间：解除归属(命名空间与其中的工作负载不被删除), 仅集群所属项目可操作",
+        "operationId": "Namespace_RecycleNamespace",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/bcsprojectRecycleNamespaceResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response",
+            "schema": {
+              "$ref": "#/definitions/runtimeError"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "projectCode",
+            "description": "操作方项目编码(集群所属项目), 用于权限校验",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "clusterID",
+            "description": "集群 ID",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "namespace",
+            "description": "命名空间名称, 必须是已分配的命名空间",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/bcsprojectRecycleNamespaceRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Namespace"
+        ]
+      }
+    },
     "/bcsproject/v1/projects/{projectCode}/clusters/{clusterID}/namespaces/{namespace}/variables": {
       "get": {
         "summary": "获取命名空间的所有变量值",
@@ -5398,6 +5453,70 @@
         }
       },
       "title": "QuotaSharedProjectList 额度共享配置列表包装类型（用于区分未传值和空值）"
+    },
+    "bcsprojectRecycleNamespaceRequest": {
+      "type": "object",
+      "properties": {
+        "projectCode": {
+          "type": "string",
+          "description": "操作方项目编码(集群所属项目), 用于权限校验",
+          "title": "projectCode"
+        },
+        "clusterID": {
+          "type": "string",
+          "description": "集群 ID",
+          "title": "clusterID"
+        },
+        "namespace": {
+          "type": "string",
+          "description": "命名空间名称, 必须是已分配的命名空间",
+          "title": "namespace"
+        },
+        "deleteQuota": {
+          "type": "boolean",
+          "format": "boolean",
+          "description": "是否同时删除命名空间中的 ResourceQuota, 默认 true",
+          "title": "deleteQuota"
+        }
+      },
+      "description": "回收命名空间请求(解除归属, 命名空间与其中的工作负载不被删除)",
+      "title": "RecycleNamespaceRequest",
+      "required": [
+        "projectCode",
+        "clusterID",
+        "namespace"
+      ]
+    },
+    "bcsprojectRecycleNamespaceResponse": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int64",
+          "description": "返回错误码",
+          "title": "code"
+        },
+        "message": {
+          "type": "string",
+          "description": "返回错误信息",
+          "title": "message"
+        },
+        "data": {
+          "$ref": "#/definitions/bcsprojectNamespaceData",
+          "description": "返回详细信息, 可以为空",
+          "title": "data"
+        },
+        "requestID": {
+          "type": "string",
+          "description": "请求 ID",
+          "title": "request id"
+        },
+        "web_annotations": {
+          "$ref": "#/definitions/bcsprojectPerms",
+          "description": "更多信息，主要是权限相关",
+          "title": "web_annotations"
+        }
+      }
     },
     "bcsprojectRenderVariablesResponse": {
       "type": "object",

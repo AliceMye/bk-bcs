@@ -1096,6 +1096,16 @@ service Namespace {
       summary : "分配命名空间 / 变更归属"
     };
   }
+  rpc RecycleNamespace(RecycleNamespaceRequest) returns (RecycleNamespaceResponse) {
+    option (google.api.http) = {
+      post : "/bcsproject/v1/projects/{projectCode}/clusters/{clusterID}/namespaces/{namespace}/recycle"
+      body : "*"
+    };
+    option (grpc.gateway.protoc_gen_swagger.options.openapiv2_operation) = {
+      description : "回收已分配的命名空间：解除归属(命名空间与其中的工作负载不被删除), 仅集群所属项目可操作"
+      summary : "回收命名空间"
+    };
+  }
 }
 
 message SyncNamespaceRequest {
@@ -1293,6 +1303,60 @@ message AllocateNamespaceRequest {
 }
 
 message AllocateNamespaceResponse {
+  uint32 code = 1[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title : "code",
+    description: "返回错误码"
+  }];
+  string message = 2[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title : "message",
+    description: "返回错误信息"
+  }];
+  NamespaceData data = 3[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "data",
+    description: "返回详细信息, 可以为空"
+  }];
+  string requestID = 4[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "request id",
+    description: "请求 ID"
+  }];
+  Perms web_annotations = 5[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title : "web_annotations",
+    description : "更多信息，主要是权限相关"
+  }, json_name = "web_annotations"];
+}
+
+message RecycleNamespaceRequest {
+  option (grpc.gateway.protoc_gen_swagger.options.openapiv2_schema) = {
+    json_schema : {
+      title : "RecycleNamespaceRequest"
+      description : "回收命名空间请求(解除归属, 命名空间与其中的工作负载不被删除)"
+      required : [
+        "projectCode",
+        "clusterID",
+        "namespace"
+      ]
+    }
+  };
+
+  string projectCode = 1[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "projectCode",
+    description: "操作方项目编码(集群所属项目), 用于权限校验"
+  }];
+  string clusterID = 2[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "clusterID",
+    description: "集群 ID"
+  }];
+  string namespace = 3[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "namespace",
+    description: "命名空间名称, 必须是已分配的命名空间"
+  }, (validate.rules).string = {max_len: 63, pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"}];
+  bool deleteQuota = 4[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "deleteQuota",
+    description: "是否同时删除命名空间中的 ResourceQuota, 默认 true"
+  }];
+}
+
+message RecycleNamespaceResponse {
   uint32 code = 1[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
     title : "code",
     description: "返回错误码"

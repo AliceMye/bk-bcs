@@ -98,6 +98,22 @@ func (p *NamespaceHandler) AllocateNamespace(ctx context.Context,
 	return action.AllocateNamespace(ctx, req, resp)
 }
 
+// RecycleNamespace implement for RecycleNamespace interface
+func (p *NamespaceHandler) RecycleNamespace(ctx context.Context,
+	req *proto.RecycleNamespaceRequest, resp *proto.RecycleNamespaceResponse) error {
+
+	authUser := tenant.GetAuthAndTenantInfoFromCtx(ctx)
+	ctx = tenant.WithTenantIdFromContext(ctx, authUser.ResourceTenantId)
+
+	action, err := na.NewNamespaceFactory(p.model).ActionForAllocate(ctx, req.GetClusterID())
+	if err != nil {
+		logging.Error("get namespace client for cluster %s from client factory failed, err: %s",
+			req.GetClusterID(), err.Error())
+		return err
+	}
+	return action.RecycleNamespace(ctx, req, resp)
+}
+
 // CreateNamespaceCallback implement for CreateNamespaceCallback interface
 func (p *NamespaceHandler) CreateNamespaceCallback(ctx context.Context,
 	req *proto.NamespaceCallbackRequest, resp *proto.NamespaceCallbackResponse) error {
