@@ -1286,6 +1286,10 @@ message AllocateNamespaceRequest {
     title: "quota",
     description: "命名空间配额, 可选: 未指定时已有 ResourceQuota 的命名空间保留原配额不覆盖; 无配额的命名空间必须指定, CPU/内存必填, request 与 limit 取相同值"
   }];
+  bool overwrite = 6[(grpc.gateway.protoc_gen_swagger.options.openapiv2_field) = {
+    title: "overwrite",
+    description: "是否覆盖命名空间已有配额, 默认 false: quota 仅对无配额的命名空间生效"
+  }];
 }
 
 message AllocateNamespaceResponse {

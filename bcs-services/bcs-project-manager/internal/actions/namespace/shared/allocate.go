@@ -87,7 +87,7 @@ func (a *SharedNamespaceAction) AllocateNamespace(ctx context.Context,
 		return errorx.NewReadableErr(errorx.ParamErr, "vcluster 占用的命名空间，不可分配")
 	}
 
-	// 配额保留策略：未指定配额时，已有 ResourceQuota 的命名空间保留原配额不覆盖； 无配额的命名空间必须显式指定配额（Q4）
+	// 配额保留策略：未指定配额时，已有 ResourceQuota 的命名空间保留原配额不覆盖； 无配额的命名空间必须显式指定配额
 	existingQuota, quotaErr := client.CoreV1().ResourceQuotas(req.GetNamespace()).
 		Get(ctx, req.GetNamespace(), metav1.GetOptions{})
 	if quotaErr != nil && !k8serrors.IsNotFound(quotaErr) {
@@ -99,6 +99,12 @@ func (a *SharedNamespaceAction) AllocateNamespace(ctx context.Context,
 	if req.GetQuota() == nil && !hasExistingQuota {
 		return errorx.NewReadableErr(errorx.ParamErr,
 			fmt.Sprintf("命名空间 [%s] 无配额，分配时必须设置配额", req.GetNamespace()))
+	}
+	// 批量分配语义（N6 备注）：默认（overwrite=false）时请求配额仅对无ResourceQuota的
+	// overwrite=true 时显式覆盖，供单个手动调整场景使用
+	effectiveQuota := req.GetQuota()
+	if req.GetQuota() != nil && hasExistingQuota && !req.GetOverwrite() {
+		effectiveQuota = nil
 	}
 
 	annoKey := config.GlobalConf.SharedClusterConfig.AnnoKeyProjCode
@@ -128,16 +134,14 @@ func (a *SharedNamespaceAction) AllocateNamespace(ctx context.Context,
 			req.GetClusterID(), req.GetNamespace(), err.Error())
 		return errorx.NewClusterErr(err.Error())
 	}
-	// 下发 ResourceQuota
-	if err := applyResourceQuota(ctx, req.GetClusterID(), req.GetNamespace(), req.GetQuota()); err != nil {
+	// 下发 ResourceQuota（使用最终生效配额：保留场景为 nil，跳过下发）
+	if err := applyResourceQuota(ctx, req.GetClusterID(), req.GetNamespace(), effectiveQuota); err != nil {
 		return err
 	}
 
-	// 写入DB记录：分配（无归属记录）新建；变更归属转移；归属不变仅更新配额
-	// 配额取值：优先请求指定值；未指定时保留 k8s 现有 ResourceQuota 配额
-	quotaModel := resolveQuotaModel(req.GetQuota(), existingQuota)
+	// 写入DB记录：分配（无归属记录）新建；变更归属转移；归属不变仅更新配额；配额取值：优先请求指定值；未指定时保留k8s现有 ResourceQuota 配额
+	quotaModel := resolveQuotaModel(effectiveQuota, existingQuota)
 	now := time.Now().UTC().Format(time.RFC3339)
-	// 分配：新建 DB 记录（Source 暂不写入，入库为空）
 	createRecord := func(projectCode string) error {
 		nsModel := &nsm.Namespace{
 			ProjectCode:   projectCode,

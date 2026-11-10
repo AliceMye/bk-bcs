@@ -4391,6 +4391,8 @@ func (m *AllocateNamespaceRequest) validate(all bool) error {
 		}
 	}
 
+	// no validation rules for Overwrite
+
 	if len(errors) > 0 {
 		return AllocateNamespaceRequestMultiError(errors)
 	}
