@@ -20,20 +20,24 @@ import (
 	"time"
 
 	"github.com/Tencent/bk-bcs/bcs-services/pkg/bcs-auth/middleware"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/actions/namespace/independent"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/common/constant"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/common/envs"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/bcscc"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/clientset"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/clustermanager"
 	v2 "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/component/itsm/v2"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/config"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/logging"
 	nsm "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/store/namespace"
+	vvm "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/store/variablevalue"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/util/errorx"
 	quotautils "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/util/quota"
+	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/util/stringx"
 	proto "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/proto/bcsproject"
 )
 
@@ -46,25 +50,25 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 	if err := a.validateCreate(ctx, req); err != nil {
 		return err
 	}
-	// if itsm is not enable, create namespace directly
-	if !config.GlobalConf.ITSM.Enable {
-		ia := independent.NewIndependentNamespaceAction(a.model)
-		req.Annotations = append(req.Annotations, &proto.Annotation{
-			Key:   config.GlobalConf.SharedClusterConfig.AnnoKeyProjCode,
-			Value: req.GetProjectCode(),
-		})
-		return ia.CreateNamespace(ctx, req, resp)
-	}
 	var username string
 	if authUser, gErr := middleware.GetUserFromContext(ctx); gErr == nil {
 		username = authUser.GetUsername()
 	}
-	namespace := &nsm.Namespace{
+	// ITSM 开启时，仅非集群所属项目管理员走审批；所属项目管理员为可见范围内项目创建无需审批
+	if config.GlobalConf.ITSM.Enable && !a.isClusterOwnerManager(ctx, req.GetClusterID(), username) {
+		return a.submitCreateTicket(ctx, req, username)
+	}
+	// 直接创建：ns + 归属注解 + 下发配额，不自动授予创建者命名空间权限
+	if err := a.createNamespaceInCluster(ctx, req, username); err != nil {
+		return err
+	}
+	// 落 DB 归属记录（集群视角列表的归属回填/更新时间展示依赖）
+	nsModel := &nsm.Namespace{
 		ProjectCode: req.GetProjectCode(),
 		ClusterID:   req.GetClusterID(),
 		Name:        req.GetName(),
 		Creator:     username,
-		Managers:    username,
+		Updater:     username,
 		ResourceQuota: &nsm.Quota{
 			CPURequests:    req.GetQuota().GetCpuRequests(),
 			CPULimits:      req.GetQuota().GetCpuLimits(),
@@ -73,43 +77,27 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 		},
 		UpdateTime: time.Now().UTC().Format(time.RFC3339),
 	}
-	variables := []*nsm.Variable{}
+	if err := a.model.CreateNamespace(ctx, nsModel); err != nil {
+		logging.Error("create namespace %s/%s in db failed, err: %s",
+			req.GetClusterID(), req.GetName(), err.Error())
+		return errorx.NewDBErr(err.Error())
+	}
+	// 变量值
 	for _, variable := range req.GetVariables() {
-		variables = append(variables, &nsm.Variable{
-			VariableID: variable.Id,
-			ClusterID:  variable.ClusterID,
-			Namespace:  variable.Namespace,
-			Key:        variable.Key,
-			Value:      variable.Value,
-		})
+		entity := &vvm.VariableValue{
+			VariableID: variable.GetId(),
+			Value:      variable.GetValue(),
+		}
+		if err := a.model.UpsertVariableValue(ctx, entity); err != nil {
+			return err
+		}
 	}
-	namespace.Variables = variables
-	cpuLimits, err := resource.ParseQuantity(req.GetQuota().GetCpuLimits())
-	if err != nil {
-		logging.Error("parse quantity cpu limits failed, err: %s", err.Error())
-		return err
-	}
-	memoryLimits, err := resource.ParseQuantity(req.GetQuota().GetMemoryLimits())
-	if err != nil {
-		logging.Error("parse quantity cpu limits failed, err: %s", err.Error())
-		return err
-	}
-	// memoryLimits.Value() return unit is byte， needs to be converted to Gi (divide 2^30)
-	// TODO ITSM 传入 tenantID
-	itsmResp, err := v2.SubmitCreateNamespaceTicket(ctx, username, req.GetProjectCode(), req.GetClusterID(), req.GetName(),
-		int(cpuLimits.Value()), int(memoryLimits.Value()/int64(math.Pow(2, 30))))
-	if err != nil {
-		logging.Error("itsm create ticket failed, err: %s", err.Error())
-		return err
-	}
-	namespace.ItsmTicketType = nsm.ItsmTicketTypeCreate
-	namespace.ItsmTicketURL = itsmResp.TicketURL
-	namespace.ItsmTicketStatus = nsm.ItsmTicketStatusCreated
-	namespace.ItsmTicketSN = itsmResp.SN
-	if err := a.model.CreateNamespace(ctx, namespace); err != nil {
-		logging.Error("create namespace %s/%s in db failed, err: %s", req.GetClusterID(), req.GetName(), err.Error())
-		return err
-	}
+	go func() {
+		if err := bcscc.CreateNamespace(req.GetProjectCode(), req.GetClusterID(), req.GetName(), username); err != nil {
+			logging.Error("[ALARM-CC-NAMESPACE] create namespace %s/%s/%s in paas-cc failed, err: %s",
+				req.GetProjectCode(), req.GetClusterID(), req.GetName(), err.Error())
+		}
+	}()
 	return nil
 }
 
@@ -179,6 +167,125 @@ func (a *SharedNamespaceAction) validateCreate(ctx context.Context, req *proto.C
 		if err := quotautils.ValidateQuotaEquality(req.Quota); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// isClusterOwnerManager 判断用户是否为集群所属项目的管理员
+func (a *SharedNamespaceAction) isClusterOwnerManager(ctx context.Context, clusterID, username string) bool {
+	if username == "" {
+		return false
+	}
+	cluster, err := clustermanager.GetCluster(ctx, clusterID, true)
+	if err != nil {
+		logging.Error("get cluster %s from cluster-manager failed, err: %s", clusterID, err.Error())
+		return false
+	}
+	ownerProject, err := a.model.GetProject(ctx, cluster.GetProjectID())
+	if err != nil {
+		logging.Error("get cluster owner project %s failed, err: %s", cluster.GetProjectID(), err.Error())
+		return false
+	}
+	for _, manager := range stringx.SplitString(ownerProject.Managers) {
+		if manager == username {
+			return true
+		}
+	}
+	return false
+}
+
+// submitCreateTicket 提交创建命名空间审批单，审批通过后由回调创建
+func (a *SharedNamespaceAction) submitCreateTicket(ctx context.Context,
+	req *proto.CreateNamespaceRequest, username string) error {
+	namespace := &nsm.Namespace{
+		ProjectCode: req.GetProjectCode(),
+		ClusterID:   req.GetClusterID(),
+		Name:        req.GetName(),
+		Creator:     username,
+		Managers:    username,
+		ResourceQuota: &nsm.Quota{
+			CPURequests:    req.GetQuota().GetCpuRequests(),
+			CPULimits:      req.GetQuota().GetCpuLimits(),
+			MemoryRequests: req.GetQuota().GetMemoryRequests(),
+			MemoryLimits:   req.GetQuota().GetMemoryLimits(),
+		},
+		UpdateTime: time.Now().UTC().Format(time.RFC3339),
+	}
+	variables := []*nsm.Variable{}
+	for _, variable := range req.GetVariables() {
+		variables = append(variables, &nsm.Variable{
+			VariableID: variable.Id,
+			ClusterID:  variable.ClusterID,
+			Namespace:  variable.Namespace,
+			Key:        variable.Key,
+			Value:      variable.Value,
+		})
+	}
+	namespace.Variables = variables
+	cpuLimits, err := resource.ParseQuantity(req.GetQuota().GetCpuLimits())
+	if err != nil {
+		logging.Error("parse quantity cpu limits failed, err: %s", err.Error())
+		return err
+	}
+	memoryLimits, err := resource.ParseQuantity(req.GetQuota().GetMemoryLimits())
+	if err != nil {
+		logging.Error("parse quantity memory limits failed, err: %s", err.Error())
+		return err
+	}
+	// memoryLimits.Value() return unit is byte， needs to be converted to Gi (divide 2^30)
+	// TODO ITSM 传入 tenantID
+	itsmResp, err := v2.SubmitCreateNamespaceTicket(ctx, username, req.GetProjectCode(), req.GetClusterID(), req.GetName(),
+		int(cpuLimits.Value()), int(memoryLimits.Value()/int64(math.Pow(2, 30))))
+	if err != nil {
+		logging.Error("itsm create ticket failed, err: %s", err.Error())
+		return err
+	}
+	namespace.ItsmTicketType = nsm.ItsmTicketTypeCreate
+	namespace.ItsmTicketURL = itsmResp.TicketURL
+	namespace.ItsmTicketStatus = nsm.ItsmTicketStatusCreated
+	namespace.ItsmTicketSN = itsmResp.SN
+	if err := a.model.CreateNamespace(ctx, namespace); err != nil {
+		logging.Error("create namespace %s/%s in db failed, err: %s", req.GetClusterID(), req.GetName(), err.Error())
+		return err
+	}
+	return nil
+}
+
+// createNamespaceInCluster 在集群中直接创建命名空间并下发配额（不做IAM授权）
+func (a *SharedNamespaceAction) createNamespaceInCluster(ctx context.Context,
+	req *proto.CreateNamespaceRequest, creator string) error {
+	client, err := clientset.GetClientGroup().Client(req.GetClusterID())
+	if err != nil {
+		return err
+	}
+	ns := &corev1.Namespace{}
+	ns.SetName(req.GetName())
+	ns.SetAnnotations(map[string]string{
+		config.GlobalConf.SharedClusterConfig.AnnoKeyProjCode: req.GetProjectCode(),
+		constant.AnnotationKeyCreator:                         creator,
+	})
+	if _, err := client.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{}); err != nil {
+		logging.Error("create namespace %s in cluster %s failed, err: %s",
+			req.GetName(), req.GetClusterID(), err.Error())
+		return errorx.NewClusterErr(err.Error())
+	}
+	quota := &corev1.ResourceQuota{
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{}},
+	}
+	quota.SetName(req.GetName())
+	quota.SetNamespace(req.GetName())
+	if err := quotautils.LoadFromModel(quota, &nsm.Quota{
+		CPURequests:    req.GetQuota().GetCpuRequests(),
+		CPULimits:      req.GetQuota().GetCpuLimits(),
+		MemoryRequests: req.GetQuota().GetMemoryRequests(),
+		MemoryLimits:   req.GetQuota().GetMemoryLimits(),
+	}); err != nil {
+		return err
+	}
+	if _, err := client.CoreV1().ResourceQuotas(req.GetName()).Create(ctx, quota, metav1.CreateOptions{}); err != nil {
+		logging.Error("create resourcequota %s in cluster %s failed, err: %s",
+			req.GetName(), req.GetClusterID(), err.Error())
+		return errorx.NewClusterErr(err.Error())
 	}
 	return nil
 }
