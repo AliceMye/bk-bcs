@@ -309,6 +309,23 @@ func (m *ModelNamespace) ListNamespaces(ctx context.Context) ([]Namespace, error
 	return nsList, err
 }
 
+// ListNamespacesByCluster list active namespaces of a cluster
+func (m *ModelNamespace) ListNamespacesByCluster(ctx context.Context, clusterID string) ([]Namespace, error) {
+	if clusterID == "" {
+		return nil, fmt.Errorf("can not list namespaces, no enough arguments")
+	}
+	if err := m.ensureTable(ctx); err != nil {
+		return nil, err
+	}
+	nsList := []Namespace{}
+	cond := operator.NewLeafCondition(operator.Eq, operator.M{
+		FieldKeyClusterID: clusterID,
+		FieldKeyIsDeleted: false,
+	})
+	err := m.db.Table(m.tableName).Find(cond).All(ctx, &nsList)
+	return nsList, err
+}
+
 // ListNamespacesByItsmTicketType list namespaces by staging type
 func (m *ModelNamespace) ListNamespacesByItsmTicketType(ctx context.Context,
 	projectCode, clusterID string, types []string) ([]Namespace, error) {
