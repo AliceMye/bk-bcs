@@ -34,6 +34,7 @@ import (
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/config"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/logging"
 	nsm "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/store/namespace"
+	vdm "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/store/variabledefinition"
 	vvm "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/store/variablevalue"
 	"github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/util/errorx"
 	quotautils "github.com/Tencent/bk-bcs/bcs-services/bcs-project-manager/internal/util/quota"
@@ -58,11 +59,10 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 	if config.GlobalConf.ITSM.Enable && !a.isClusterOwnerManager(ctx, req.GetClusterID(), username) {
 		return a.submitCreateTicket(ctx, req, username)
 	}
-	// 直接创建：ns + 归属注解 + 下发配额，不自动授予创建者命名空间权限
+	// 直接创建ns，不自动授予创建者命名空间权限
 	if err := a.createNamespaceInCluster(ctx, req, username); err != nil {
 		return err
 	}
-	// 落 DB 归属记录（集群视角列表的归属回填/更新时间展示依赖）
 	nsModel := &nsm.Namespace{
 		ProjectCode: req.GetProjectCode(),
 		ClusterID:   req.GetClusterID(),
@@ -87,6 +87,9 @@ func (a *SharedNamespaceAction) CreateNamespace(ctx context.Context,
 		entity := &vvm.VariableValue{
 			VariableID: variable.GetId(),
 			Value:      variable.GetValue(),
+			Scope:      vdm.VariableScopeNamespace,
+			ClusterID:  req.GetClusterID(),
+			Namespace:  req.GetName(),
 		}
 		if err := a.model.UpsertVariableValue(ctx, entity); err != nil {
 			return err
@@ -123,7 +126,6 @@ func (a *SharedNamespaceAction) validateCreate(ctx context.Context, req *proto.C
 		}
 	}
 	// check is namespace name valid
-	// 长名回退：bcs-{projectCode}- 前缀 + 自定义部分超 63 字符时，允许使用平台前缀 bcs-
 	fullPrefix := fmt.Sprintf(NamespacePrefix, req.ProjectCode)
 	platformPrefix := envs.BCSNamespacePrefix + "-"
 	if !strings.HasPrefix(req.Name, fullPrefix) {
@@ -233,7 +235,6 @@ func (a *SharedNamespaceAction) submitCreateTicket(ctx context.Context,
 		return err
 	}
 	// memoryLimits.Value() return unit is byte， needs to be converted to Gi (divide 2^30)
-	// TODO ITSM 传入 tenantID
 	itsmResp, err := v2.SubmitCreateNamespaceTicket(ctx, username, req.GetProjectCode(), req.GetClusterID(), req.GetName(),
 		int(cpuLimits.Value()), int(memoryLimits.Value()/int64(math.Pow(2, 30))))
 	if err != nil {
